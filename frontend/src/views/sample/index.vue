@@ -50,7 +50,7 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无取样检测数据，可先登记检测单</td>
+          <td :colspan="columns.length + 1" class="empty-state">{{ emptyText }}</td>
         </tr>
       </tbody>
     </table>
@@ -67,19 +67,29 @@ import { onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
+import { ACTIONS, COLUMNS, ENDPOINT, REQUIRED_FIELDS } from './rules'
+
 type Row = Record<string, string | number | null>
 
-const ENDPOINT = '/api/sample'
-const columns = ["检测单号", "取样点位", "检测项目", "检测值", "标准限值", "检测结论", "检测人员", "检测状态"]
-const actions = ["开始检测", "判定合格", "判定不合格"]
-const statuses = ["待取样", "检测中", "合格", "不合格"]
+type ActionResponse = {
+  ok: boolean
+  message: string
+  entry?: Row | null
+}
+
+const columns = COLUMNS
+const actions = ACTIONS
 const stats = [{"label": "待取样检测", "value": 0}, {"label": "检测合格率", "value": 0}, {"label": "不合格批次", "value": 0}]
+
+/** 筛选框只取必填字段，与登记口径一致，不再单独写一份列名 */
+const filterFields = [...REQUIRED_FIELDS]
+/** 空数据说明：接口返回空页时原样展示，不让人误以为加载失败 */
+const emptyText = '暂无取样检测数据，可先登记检测单（检测单号、取样点位、检测项目为必填）'
 
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
 
 function resetFilters() {
   filters.value = {}
@@ -87,6 +97,7 @@ function resetFilters() {
 }
 
 function exportRows() {
+  // 后端 /export 为静态路径，已置于 /{id} 之前，导出不会再被当成检测单解析报错
   window.open(`${ENDPOINT}/export`, '_blank')
 }
 
@@ -101,8 +112,10 @@ async function runAction(action: string, row: Row) {
       method: 'POST',
       body: JSON.stringify({ action }),
     })
-    if (!response.ok) {
-      throw new Error('取样检测动作未生效，请稍后重试')
+    const payload = (await response.json()) as ActionResponse
+    // 动作被业务规则拦下时接口仍返回 200，以 body 中的 ok/message 为准，直接透传后端说明
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.message || '取样检测动作未生效，请稍后重试')
     }
     await reload()
   } catch (error) {
