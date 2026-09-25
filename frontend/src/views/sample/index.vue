@@ -19,9 +19,9 @@
     </div>
 
     <form class="filter-bar" @submit.prevent="reload">
-      <label v-for="field in filterFields" :key="field" class="filter-item">
-        <span>{{ field }}</span>
-        <input v-model="filters[field]" :placeholder="`按${field}检索`" />
+      <label v-for="field in filterFields" :key="field.key" class="filter-item">
+        <span>{{ field.label }}</span>
+        <input v-model="filters[field.key]" :placeholder="`按${field.label}检索`" />
       </label>
       <button class="btn" type="submit">查询</button>
       <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
@@ -36,7 +36,7 @@
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="column in columns" :key="column">{{ displayCell(row[column]) }}</td>
           <td class="row-actions">
             <button
               v-for="action in actions"
@@ -50,7 +50,7 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无取样检测数据，可先登记检测单</td>
+          <td :colspan="columns.length + 1" class="empty-state">{{ noticeMessage || '暂无取样检测数据，可先登记检测单' }}</td>
         </tr>
       </tbody>
     </table>
@@ -67,19 +67,48 @@ import { onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, string | number | boolean | null>
 
 const ENDPOINT = '/api/sample'
-const columns = ["检测单号", "取样点位", "检测项目", "检测值", "标准限值", "检测结论", "检测人员", "检测状态"]
-const actions = ["开始检测", "判定合格", "判定不合格"]
-const statuses = ["待取样", "检测中", "合格", "不合格"]
-const stats = [{"label": "待取样检测", "value": 0}, {"label": "检测合格率", "value": 0}, {"label": "不合格批次", "value": 0}]
+const EMPTY_TEXT = '未填报'
+const columns = ['检测单号', '取样点位', '检测项目', '检测值', '标准限值', '检测结论', '检测人员', '检测状态']
+const actions = ['开始检测', '判定合格', '判定不合格']
+const stats = [{ label: '待取样检测', value: 0 }, { label: '检测合格率', value: 0 }, { label: '不合格批次', value: 0 }]
 
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const noticeMessage = ref('')
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const filterFields = [
+  { key: '检测单号', label: '检测单号' },
+  { key: '检测状态', label: '检测状态' },
+]
+
+function displayCell(value: Row[string]) {
+  return value === null || value === undefined || value === '' ? EMPTY_TEXT : value
+}
+
+function buildQuery() {
+  const params = new URLSearchParams()
+  const keyword = filters.value['检测单号']?.trim()
+  const status = filters.value['检测状态']?.trim()
+  if (keyword) params.set('keyword', keyword)
+  if (status) params.set('status', status)
+  const query = params.toString()
+  return query ? `?${query}` : ''
+}
+
+async function readResponseMessage(response: Response, fallback: string) {
+  try {
+    const payload = await response.json()
+    if (typeof payload?.detail === 'string') return payload.detail
+    if (typeof payload?.message === 'string') return payload.message
+  } catch {
+    // 非 JSON 错误沿用兜底说明。
+  }
+  return fallback
+}
 
 function resetFilters() {
   filters.value = {}
@@ -87,7 +116,7 @@ function resetFilters() {
 }
 
 function exportRows() {
-  window.open(`${ENDPOINT}/export`, '_blank')
+  window.open(`${ENDPOINT}/export${buildQuery()}`, '_blank')
 }
 
 function openCreate() {
@@ -96,13 +125,15 @@ function openCreate() {
 
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
+  noticeMessage.value = ''
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values: { action } }),
     })
-    if (!response.ok) {
-      throw new Error('取样检测动作未生效，请稍后重试')
+    const payload = await response.json()
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.message || '取样检测动作未生效，请稍后重试')
     }
     await reload()
   } catch (error) {
@@ -112,15 +143,16 @@ async function runAction(action: string, row: Row) {
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  noticeMessage.value = ''
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}${buildQuery()}`)
     if (!response.ok) {
-      throw new Error('检测单列表读取失败')
+      throw new Error(await readResponseMessage(response, '检测单列表读取失败'))
     }
     const payload = await response.json()
     rows.value = payload.items ?? []
     total.value = payload.total ?? rows.value.length
+    noticeMessage.value = payload.message ?? ''
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '取样检测列表读取失败'
   }

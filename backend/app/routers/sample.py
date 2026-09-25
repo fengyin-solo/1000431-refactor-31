@@ -6,28 +6,98 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.sample import SampleService
+from app.services import sample as sample_rules
+from app.services.sample import (
+    EXPORT_LIMIT,
+    MAX_PAGE_SIZE,
+    SampleService,
+    empty_list_message,
+    export_message,
+    missing_required_message,
+)
 
 router = APIRouter(prefix="/api/sample", tags=["取样检测"])
 
 service = SampleService()
 
-LIST_FIELDS = ["检测单号", "取样点位", "检测项目", "检测值", "标准限值", "检测结论", "检测人员", "检测状态"]
-STATUSES = ["待取样", "检测中", "合格", "不合格"]
+LIST_FIELDS = sample_rules.LIST_FIELDS
+STATUSES = sample_rules.STATUS_ORDER
 
 
-@router.get("", response_model=PageResult[dict])
+class SamplePageResult(PageResult[dict]):
+    message: str | None = None
+
+
+def list_result(
+    *,
+    keyword: str | None,
+    status: str | None,
+    page: int,
+    size: int,
+    max_size: int = MAX_PAGE_SIZE,
+) -> SamplePageResult:
+    try:
+        items, total = service.list_entries(
+            keyword=keyword,
+            status=status,
+            page=page,
+            size=size,
+            max_size=max_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    normalized_page = max(page, 1)
+    return SamplePageResult(
+        items=items,
+        total=total,
+        page=normalized_page,
+        size=size,
+        message=empty_list_message(total, normalized_page, size),
+    )
+
+
+@router.get("", response_model=SamplePageResult)
 def list_entries(
     keyword: str | None = Query(default=None, description="按检测单号检索"),
     status: str | None = Query(default=None, description="待取样、检测中、合格、不合格"),
     page: int = 1,
     size: int = 20,
-) -> PageResult[dict]:
+) -> SamplePageResult:
     """按检测单号与状态过滤取样检测列表；没有数据时返回空页，不报错。"""
-    if size > 200:
-        raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
-    return PageResult(items=items, total=total, page=page, size=size)
+    return list_result(keyword=keyword, status=status, page=page, size=size)
+
+
+@router.get("/export")
+def export_entries(
+    keyword: str | None = Query(default=None, description="按检测单号检索"),
+    status: str | None = Query(default=None, description="待取样、检测中、合格、不合格"),
+) -> dict[str, Any]:
+    """导出当前筛选条件下不超过上限的取样检测数据；空结果也返回明确说明。"""
+    try:
+        total = len(service.filtered_entries(keyword=keyword, status=status))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if total > EXPORT_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=export_message(total, EXPORT_LIMIT),
+        )
+
+    result = list_result(
+        keyword=keyword,
+        status=status,
+        page=1,
+        size=max(total, 1),
+        max_size=EXPORT_LIMIT,
+    )
+    return {
+        "module": "sample",
+        "total": result.total,
+        "message": export_message(result.total, EXPORT_LIMIT),
+        "items": result.items,
+    }
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -44,7 +114,7 @@ def create_entry(payload: EntryPayload) -> ActionResult:
     """登记一条检测单，缺字段时说明原因而不是静默丢弃。"""
     entry, missing = service.create_entry(payload.values)
     if missing:
-        return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
+        return ActionResult(ok=False, message=missing_required_message(missing))
     return ActionResult(ok=True, message="检测单已登记", entry=entry)
 
 
@@ -56,10 +126,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出取样检测清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "sample", "total": total, "items": items}
